@@ -1,0 +1,28 @@
+# Comments are provided throughout this file to help you get started.
+# If you need more help, visit the Docker Compose reference guide at
+# https://docs.docker.com/go/compose-spec-reference/
+
+# Here the instructions define your application as a service called "app".
+# This service is built from the Dockerfile in the current directory.
+# You can add other services your application may depend on here, such as a
+# database or a cache. For examples, see the Awesome Compose repository:
+# https://github.com/docker/awesome-compose
+services:
+  app:
+    build:
+      context: .
+    container_name: novalink-voip-pbx
+    # network_mode: host disables Docker Desktop's port-forwarding proxy, which is the
+    # only thing that makes 127.0.0.1:<port> reachable from Windows in the first place
+    # (Docker Desktop's engine runs in its own docker-desktop VM, not in this WSL distro).
+    # Publish ports explicitly instead so RTP works without breaking SIP.
+    ports:
+      - "127.0.0.1:5060:5060/udp"
+      - "127.0.0.1:10000-10020:10000-10020/udp"
+
+    volumes:
+      - ./config/etc/asterisk:/etc/asterisk
+    # secrets:
+    #   db-password:
+    #     file: db/password.txt
+    restart: unless-stopped
