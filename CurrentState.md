@@ -165,7 +165,7 @@ Para desplegar esta PBX en un servidor Linux limpio (por ejemplo, para pruebas e
      - "5060:5060/udp"
      - "10000-10020:10000-10020/udp"
    ```
-4. **Abrir el firewall** del servidor (ej. `ufw`) para UDP 5060 y el rango RTP configurado en `rtp.conf`.
+4. **Abrir el firewall** del servidor para UDP 5060 y el rango RTP configurado en `rtp.conf`. Ver [`docs/TRONCALES.md` §2.4.2](docs/TRONCALES.md#242-servidor-linux-con-docker) para los comandos de `ufw`/`firewalld`, los grupos de seguridad del proveedor cloud y, sobre todo, **el aviso de que Docker en modo bridge se salta `ufw`**: en un servidor Linux la opción recomendada es `network_mode: host`, que además conserva la IP de origen y permite ampliar el rango RTP sin publicar miles de puertos.
 5. **Ajustar direcciones en `pjsip.conf`:** `external_media_address` y `external_signaling_address` están hardcodeadas a `127.0.0.1`, lo cual solo tiene sentido en local. En un servidor deben apuntar a la IP pública (o usar detección NAT vía `external_media_address`/`external_signaling_address` con la IP real, o STUN si la IP es dinámica).
 6. **Build y arranque:**
    ```bash
@@ -181,24 +181,73 @@ Para desplegar esta PBX en un servidor Linux limpio (por ejemplo, para pruebas e
 
 ## 4. Pendientes del proyecto
 
-A continuación se detalla lo que falta por implementar, con el estado real encontrado en el código a la fecha (2026-09-16):
+A continuación se detalla lo que falta por implementar, con el estado real encontrado en el código. Última actualización: **2026-09-20**.
 
-### 4.1 Codecs de audio y video
-`codecs.conf` está presente únicamente con los valores de ejemplo por defecto que trae Asterisk (`speex`, `silk8/12/16/24`, opus comentado, etc.) — no ha sido ajustado para el proyecto. Los endpoints en `pjsip.conf` (1001, 1002) solo tienen `allow=ulaw`. Falta:
-- Definir explícitamente la lista de codecs permitidos por endpoint/plantilla (ej. `ulaw`, `alaw`, `g722` para voz de buena calidad en LAN; evaluar `opus` para WAN con pérdida).
-- Decidir si se requiere soporte de video (actualmente no hay ningún `allow=h264`/`vp8` configurado).
-- Documentar la política de codecs por troncal vs. por extensión interna, ya que las troncales externas pueden exigir codecs distintos a los internos.
+### 4.1 Codecs de audio y video — ✅ RESUELTO
 
-### 4.2 Troncales SIP y PJSIP
-`extensions.conf` ya referencia dos contextos de salida (`salientes_redpublica` → `trunk_redpublica`, `salientes_troncal_sip` → `trunk_sip`), pero **ninguna de las dos troncales está definida en `pjsip.conf`**. Falta:
-- Crear los `endpoint`/`aor`/`auth`/`identify` (o `registration` si el proveedor requiere registro saliente) para `trunk_redpublica` y `trunk_sip`.
-- Definir el contexto de entrada para llamadas que lleguen desde esas troncales (actualmente no existe ningún `context` de entrada de troncal en el dialplan).
-- Validar interconexión entre sedes (ver punto 4.7, "Troncales de interconexión").
+`pjsip.conf` fue reestructurado con plantillas y ahora define explícitamente la política de codecs del proyecto:
 
-### 4.3 Asegurar soporte simultáneo de SIP y PJSIP
-El proyecto compila y usa únicamente **PJSIP** (`chan_pjsip`/`res_pjsip` habilitados en `menuselect`; no se habilita `chan_sip`, que además está descontinuado/eliminado en versiones recientes de Asterisk). Falta decidir y documentar:
-- Si "SIP" se refiere a soporte del canal legado `chan_sip` (deprecado, removido de Asterisk desde la serie 21 en adelante — probablemente no aplica a Asterisk 22) o si se refiere a compatibilidad con dispositivos/proveedores que hablan SIP estándar sobre PJSIP (que ya es el caso).
-- Si es lo segundo, el trabajo pendiente es de validación de compatibilidad con distintos softphones/proveedores, no de habilitar un módulo adicional.
+| Plantilla | Codecs | Aplica a |
+|---|---|---|
+| `[codec-interno]` | `g722`, `ulaw`, `alaw` (en ese orden de preferencia) | Extensiones (1001, 1002 y futuras) |
+| `[codec-troncal]` | `ulaw`, `alaw` | Troncales externas y entre sedes |
+
+Decisiones tomadas y documentadas en el propio archivo:
+
+- **Sin video.** No se declara ningún codec de video (`h264`/`vp8`) a propósito. Si cambia, se añade en estas mismas plantillas.
+- **Sin G.729.** Asterisk no lo compila, por lo que sólo podría hacer *passthrough*: una llamada `g729 ↔ ulaw` se quedaría sin audio. Se descarta para no anunciar un codec que la PBX no puede transcodificar. Si en el futuro se requiere de verdad, hay que compilar `bcg729` + `codec_g729` en el `Dockerfile` (la patente expiró en 2017).
+- **`g722` se excluye de las troncales** a propósito: rara vez lo soportan los proveedores PSTN y anunciarlo sólo provoca transcodificación innecesaria dentro de la PBX.
+
+`codecs.conf` lleva ahora una cabecera que aclara que ese archivo **no** decide qué codecs se negocian (eso es `allow`/`disallow` en `pjsip.conf`); sólo ajusta parámetros de codecs paramétricos (speex, silk, opus), ninguno de los cuales usa el proyecto.
+
+Toda extensión nueva debe heredar de `[endpoint-interno]`, `[aor-interno]` y `[auth-interno]` para recibir automáticamente codecs, timeouts y comportamiento NAT del proyecto.
+
+### 4.2 Troncales SIP y PJSIP — ⚠️ Plantillas listas, pendiente de datos reales
+
+**Guía completa de configuración: [`docs/TRONCALES.md`](docs/TRONCALES.md)** — cubre la preparación de red en ambas máquinas (IP interna con `ipconfig`, IP pública, `compose.yaml`, reglas de firewall UDP en Windows, transporte PJSIP), llamadas entre softphones en dos laptops distintas, troncal entre dos PBX en la misma LAN o en redes distintas (NAT/registro/VPN), troncal hacia un proveedor SIP comercial, seguridad anti-fraude y tabla de diagnóstico.
+
+Lo que ya está hecho:
+
+- Plantilla `[endpoint-troncal]` en `pjsip.conf` con los ajustes de NAT y los timeouts del proyecto.
+- Tres plantillas de AOR según dónde esté el otro extremo: `[aor-troncal-lan]` (misma LAN, IP fija), `[aor-troncal-externa]` (IP pública o dominio fijo) y `[aor-troncal-dinamica]` (el otro extremo se registra, sin `contact`).
+- Los objetos completos de `trunk_redpublica` (autenticación usuario/clave + registro saliente) y `trunk_sip` (autenticación por IP, sin registro) escritos y comentados en la sección 5 de `pjsip.conf`, con placeholders en MAYÚSCULAS listos para rellenar.
+- Contextos de entrada `[entrantes_redpublica]` y `[entrantes_troncal_sip]` creados en `extensions.conf`.
+- **Corregido un fallo de enrutamiento:** los endpoints están en `context=llamadas_internas`, pero los patrones `_9X.` y `_8X.` viven en `salientes_redpublica` / `salientes_troncal_sip` y no había ningún `include =>`. Marcar `9...` u `8...` desde un softphone no encontraba destino aunque las troncales existieran. Se añadieron los `include` correspondientes.
+
+Lo que falta:
+
+- Montar la segunda instancia de Asterisk (segunda laptop con este mismo repo) que hará de otro extremo de `trunk_sip`.
+- Rellenar los placeholders con las IPs reales y descomentar los bloques.
+- **Publicar los puertos fuera de `127.0.0.1`** en `compose.yaml` y abrir UDP 5060 + 10000-10020 en el Firewall de Windows; mientras sigan atados a loopback, ninguna troncal externa puede alcanzar la PBX.
+- **Cambiar `external_media_address` / `external_signaling_address`** de `127.0.0.1` a la IP real de cada máquina; si no, la llamada se establece pero no hay audio.
+- **Cambiar las contraseñas de 1001/1002** (hoy son iguales al número de extensión) antes de exponer el 5060 a la red.
+
+### 4.3 Asegurar soporte simultáneo de SIP y PJSIP — ✅ RESUELTO (decisión documentada)
+
+**Decisión: el proyecto usa exclusivamente PJSIP. No se habilitará `chan_sip`.**
+
+El razonamiento, para que quede por escrito y no se vuelva a abrir:
+
+- `chan_sip` (el canal SIP legado) fue **eliminado de Asterisk a partir de la serie 21**. En Asterisk 22 el módulo sencillamente no existe, así que "soportar ambos simultáneamente" no es una opción técnica disponible, independientemente de lo que se configure en `menuselect`.
+- PJSIP **es** SIP: implementa el mismo protocolo estándar (RFC 3261). Cualquier softphone, teléfono IP o proveedor que "hable SIP" se conecta a `res_pjsip` sin problema. Los dos softphones MicroSIP ya probados son la demostración.
+- Por tanto, si el requisito original quería decir *"que convivan dispositivos y proveedores SIP de distinta procedencia"*, **ya está cumplido**: es lo que hace la configuración actual.
+
+Lo que queda no es habilitar un módulo, sino **validar compatibilidad**. Checklist sugerido conforme se incorporen dispositivos:
+
+| Cliente / proveedor | Registra | Audio bidireccional | Codec negociado | DTMF | Notas |
+|---|---|---|---|---|---|
+| MicroSIP (Windows) | ✅ | ✅ | ulaw | — | Probado, 2 llamadas simultáneas |
+| Zoiper / Linphone | ⬜ | ⬜ | ⬜ | ⬜ | |
+| Teléfono IP físico | ⬜ | ⬜ | ⬜ | ⬜ | |
+| Troncal del proveedor | ⬜ | ⬜ | ⬜ | ⬜ | |
+
+Herramientas para llenarla, desde `make cli`:
+
+```
+pjsip set logger on           ; ver la señalización SIP en crudo
+pjsip show endpoints          ; estado de registro
+core show channels verbose    ; codec realmente negociado en una llamada activa
+```
 
 ### 4.4 Cifrado de audio (SRTP) y señalización (TLS)
 `res_srtp` ya se habilita en el `Dockerfile` vía `menuselect`, pero **no hay ningún transporte TLS ni ningún endpoint con `media_encryption` configurado** en `pjsip.conf`. Solo existe `[transport-udp]` sin cifrado. Falta:
@@ -242,9 +291,10 @@ Actualmente el único timeout relacionado es `rtp_timeout_hold=900` (900 segundo
 | Build Docker (Asterisk 22 + PJSIP + SRTP compilado) | ✅ Funcional |
 | Extensiones internas (1001, 1002) | ✅ Probado con MicroSIP, 2 llamadas simultáneas |
 | Dialplan interno por sede (1XXX-5XXX) | ✅ Definido, solo probado en sede 1 |
-| Codecs de audio/video | ❌ Pendiente (solo `ulaw`, sin ajustar `codecs.conf`) |
-| Troncales SIP/PJSIP salientes | ❌ Referenciadas en dialplan, no definidas en `pjsip.conf` |
+| Codecs de audio/video | ✅ Política definida (`g722`/`ulaw`/`alaw` interno, `ulaw`/`alaw` troncal, sin video, sin G.729) |
+| Troncales SIP/PJSIP salientes | ⚠️ Plantillas y contextos de entrada listos + guía en `docs/TRONCALES.md`; faltan IPs reales y segunda PBX |
 | Cifrado SRTP/TLS | ❌ Módulo compilado, sin transporte TLS ni `media_encryption` configurado |
+| Soporte SIP (chan_sip vs PJSIP) | ✅ Decidido: sólo PJSIP (`chan_sip` no existe en Asterisk 22); queda validar compatibilidad por dispositivo |
 | Hold / Forwarding / Voicemail / Conferencias | ❌ Pendiente |
 | Parámetros SDP explícitos | ❌ Pendiente |
 | Interconexión de troncales entre sedes | ❌ Pendiente |
