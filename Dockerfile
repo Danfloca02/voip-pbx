@@ -8,6 +8,7 @@ ARG ASTERISK_VERSION=22
 # Instalacion de dependencias para Asterisk
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git wget curl ca-certificates \
+    libsrtp2-dev \
     libssl-dev libncurses5-dev libjansson-dev libsqlite3-dev \
     libedit-dev uuid-dev libxml2-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
