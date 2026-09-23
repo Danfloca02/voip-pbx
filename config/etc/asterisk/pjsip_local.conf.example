@@ -1,0 +1,56 @@
+;=============================================================================
+; TRANSPORTE SIP — VALORES PROPIOS DE CADA DESPLIEGUE
+;=============================================================================
+; Este fichero es el UNICO que cambia entre la laptop de desarrollo y el
+; servidor de produccion. Por eso NO se versiona: se copia y se rellena.
+;
+;     cp pjsip_local.conf.example pjsip_local.conf
+;
+; pjsip.conf lo trae con #include, asi que las extensiones y las troncales
+; siguen siendo identicas en todas las maquinas.
+; Guia completa: docs/TRONCALES.md §2.5
+;-----------------------------------------------------------------------------
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+
+;--- external_* : que direccion anuncia Asterisk -----------------------------
+; Asterisk mete su direccion DENTRO del SDP y de la cabecera Contact. Si
+; anuncia una direccion que el otro extremo no puede alcanzar, la llamada
+; timbra, se contesta y no se oye nada. Sintoma clasico.
+;
+; Estas dos SOLO se aplican a destinos que caen FUERA de local_net.
+;
+;   Sede en LAN, sin salida a internet  -> la IP LAN de esta maquina
+;   Servidor con IP publica             -> la IP PUBLICA
+;   Servidor detras de NAT              -> la IP PUBLICA del router,
+;                                          + redireccion de puertos en el
+external_media_address=CAMBIAR_IP_PUBLICA_O_LAN
+external_signaling_address=CAMBIAR_IP_PUBLICA_O_LAN
+
+;--- local_net : que redes son "de casa" -------------------------------------
+; Esto es lo que permite atender A LA VEZ llamadas de la misma LAN y de otra
+; red, que es el requisito de produccion.
+;
+;   Destino DENTRO de local_net -> Asterisk anuncia su direccion real (privada)
+;   Destino FUERA de local_net  -> Asterisk anuncia external_* (publica)
+;
+; Sin local_net, Asterisk trata TODO como externo y le anunciaria la IP
+; publica tambien a los telefonos de la propia LAN: el audio saldria al router
+; para volver a entrar (hairpin) y en muchos routers eso simplemente no
+; funciona.
+;
+; Se puede repetir la linea tantas veces como redes locales haya.
+local_net=192.168.0.0/24
+;local_net=10.0.0.0/8
+;local_net=172.16.0.0/12
+
+; >>> TRAMPA CON DOCKER EN MODO BRIDGE <<<
+; local_net solo es correcto si Asterisk ve la red real del host, es decir con
+; network_mode: host. En modo bridge la "direccion real" de Asterisk es la del
+; contenedor (172.17.0.x), asi que con local_net puesto anunciaria 172.17.0.x
+; a los telefonos de la LAN y se quedarian sin audio.
+; En modo bridge: comenta las lineas local_net y deja solo external_*.
+; Es una razon mas para usar network_mode: host. Ver docs/TRONCALES.md §2.4.2

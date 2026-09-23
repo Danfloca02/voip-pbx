@@ -12,13 +12,24 @@ services:
     build:
       context: .
     container_name: novalink-voip-pbx
-    # network_mode: host disables Docker Desktop's port-forwarding proxy, which is the
-    # only thing that makes 127.0.0.1:<port> reachable from Windows in the first place
-    # (Docker Desktop's engine runs in its own docker-desktop VM, not in this WSL distro).
-    # Publish ports explicitly instead so RTP works without breaking SIP.
-    ports:
-      - "127.0.0.1:5060:5060/udp"
-      - "127.0.0.1:10000-10020:10000-10020/udp"
+    # Red en modo host: el contenedor usa la pila de red del servidor, sin NAT
+    # de Docker por medio. Es la forma recomendada de desplegar Asterisk en un
+    # servidor Linux (docs/TRONCALES.md §2.4.2), por tres motivos:
+    #
+    #   1. Conserva la IP de ORIGEN, sin la cual 'type=identify' no funciona.
+    #   2. El rango RTP no se publica puerto a puerto, asi que ampliarlo sale
+    #      gratis: solo se toca rtp.conf.
+    #   3. El trafico entra por la cadena INPUT, donde ufw/firewalld SI mandan.
+    #      En modo bridge Docker inserta su DNAT antes y se salta el firewall.
+    #
+    # Con host networking no se declara 'ports:': los puertos que abre Asterisk
+    # (5060/udp y el rango de rtp.conf) quedan expuestos directamente, y el
+    # control de acceso pasa a ser del firewall del servidor.
+    #
+    # En Windows con Docker Desktop esto NO funciona: el motor corre en su
+    # propia VM y 'host' seria la red de esa VM. Para desarrollo en Windows,
+    # usar el bloque 'ports:' de docs/TRONCALES.md §2.3 en su lugar.
+    network_mode: host
 
     volumes:
       - ./config/etc/asterisk:/etc/asterisk

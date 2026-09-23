@@ -153,11 +153,12 @@ pública en la máquina, y entonces `ipconfig` sí te la da.
 
 ### 2.3 Configurar `compose.yaml`
 
-Por defecto el repo publica los puertos **sólo en `127.0.0.1`**, o sea que la
-PBX únicamente es accesible desde su propia máquina. Sirve para probar con un
-softphone local, pero bloquea cualquier cosa que venga de fuera.
+**El repo viene configurado para el destino real: `network_mode: host`**, que
+es lo correcto en el servidor Linux de producción (§2.4.2). En Windows con
+Docker Desktop eso no funciona, así que para desarrollar en una laptop hay que
+sustituir esa línea por un bloque `ports:`.
 
-**Configuración actual (sólo local):**
+**Sólo local** (un softphone en la misma máquina, nada entra de fuera):
 
 ```yaml
     ports:
@@ -165,8 +166,8 @@ softphone local, pero bloquea cualquier cosa que venga de fuera.
       - "127.0.0.1:10000-10020:10000-10020/udp"
 ```
 
-**Configuración para dos laptops / troncales** — quitar el bind a loopback
-para escuchar en todas las interfaces:
+**Dos laptops / troncales** — quitar el bind a loopback para escuchar en todas
+las interfaces:
 
 ```yaml
     ports:
@@ -188,6 +189,9 @@ Notas:
   más, hay que ampliar el rango **en los dos sitios a la vez**:
   `rtp.conf` (`rtpstart`/`rtpend`) y `compose.yaml`. Publicar un rango grande
   en Docker Desktop es lento de arrancar, así que conviene no pasarse.
+- Recuerda revertir a `network_mode: host` antes de desplegar en el servidor,
+  y ampliar el rango RTP de vuelta (`rtp.conf` trae `10000-20000`, pensado
+  para host; en bridge hay que reducirlo).
 - No uses `network_mode: host` **en Windows**: con Docker Desktop el motor
   corre en su propia VM, no en la distro WSL, y el host de esa VM no es tu
   Windows. En un **servidor Linux sí es la opción recomendada** y cambia
@@ -491,12 +495,22 @@ cuestión de horas. Además de §7:
 - **Nunca dejes claves iguales al número de extensión** en un servidor
   expuesto. Ver §7.
 
-### 2.5 Configurar `pjsip.conf` para aceptar tráfico externo
+### 2.5 Configurar el transporte para aceptar tráfico externo
 
 Con los puertos abiertos falta que Asterisk **anuncie una dirección correcta**
-en el SDP. Hoy el transporte dice `127.0.0.1`, que sólo vale en local.
+en el SDP.
 
-En cada laptop, poner **su propia IP** de `ipconfig`:
+El transporte **no está en `pjsip.conf`**: vive en `pjsip_local.conf`, que no
+se versiona precisamente porque sus valores cambian en cada máquina. Así el
+resto de la configuración (extensiones, troncales, dialplan) es idéntica en
+las laptops y en el servidor. En cada máquina, la primera vez:
+
+```bash
+cd config/etc/asterisk
+cp pjsip_local.conf.example pjsip_local.conf
+```
+
+Y dentro, poner **su propia IP** de `ipconfig` (§2.1):
 
 ```ini
 [transport-udp]
@@ -505,17 +519,35 @@ protocol=udp
 bind=0.0.0.0:5060
 external_media_address=192.168.1.10        ; IP de ESTA máquina (§2.1)
 external_signaling_address=192.168.1.10
+local_net=192.168.1.0/24                   ; la LAN de esta máquina
 ```
 
-Para el escenario de internet (§5), estas dos van con la **IP pública** (§2.2)
-y se añade `local_net` para que Asterisk no reescriba direcciones en el
-tráfico que sí es local:
+Para el escenario de internet (§5), `external_*` van con la **IP pública**
+(§2.2) y `local_net` se queda con la LAN:
 
 ```ini
 external_media_address=200.44.x.x
 external_signaling_address=200.44.x.x
 local_net=192.168.1.0/24
 ```
+
+**Esa combinación es la que permite atender a la vez llamadas de la propia LAN
+y de otra red**, que es el requisito de producción:
+
+| Destino | Qué anuncia Asterisk |
+|---|---|
+| Dentro de `local_net` (teléfono de la sede) | su dirección real privada |
+| Fuera de `local_net` (otra sede, proveedor) | `external_*`, la pública |
+
+Sin `local_net`, Asterisk trata **todo** como externo y le anuncia la IP
+pública también a los teléfonos de la propia LAN. El audio sale al router para
+volver a entrar (*hairpin*) y en muchos routers eso no funciona.
+
+> **`local_net` exige `network_mode: host`.** En modo bridge la "dirección
+> real" de Asterisk es la del contenedor (`172.17.0.x`), así que con
+> `local_net` puesto anunciaría esa IP a los teléfonos de la LAN y se
+> quedarían sin audio. En bridge: comenta `local_net` y deja sólo
+> `external_*`. Es otra razón para preferir `host` (§2.4.2).
 
 Por qué importa: Asterisk corre dentro de un contenedor y sólo se ve a sí
 mismo como `172.17.0.x`. Si no le dices cuál es su dirección real, anunciará
@@ -589,12 +621,14 @@ En **ambas** laptops:
 - [ ] `make check` muestra `0.0.0.0:5060->5060/udp` (§2.3)
 - [ ] Reglas de firewall UDP 5060 y 10000-10020 creadas (§2.4)
 - [ ] Perfil de red en `Private` (§2.4)
-- [ ] `external_media_address` y `external_signaling_address` con la IP real (§2.5)
+- [ ] `pjsip_local.conf` creado desde el `.example`, con la IP real (§2.5)
 - [ ] Claves de 1001/1002 cambiadas: ya no estás en loopback (§7)
 
 Si el destino es un **servidor Linux** en vez de dos laptops (§2.4.2):
 
 - [ ] `network_mode: host` en `compose.yaml`, sin bloque `ports:`
+- [ ] `pjsip_local.conf` del servidor con la IP **pública** en `external_*`
+      y la LAN de la sede en `local_net` (§2.5)
 - [ ] `ufw` / `firewalld` con UDP 5060 y el rango RTP, restringidos por IP de origen
 - [ ] `sudo ufw allow OpenSSH` antes de `ufw enable`
 - [ ] Grupo de seguridad del proveedor cloud abierto en **UDP** (no sólo TCP)

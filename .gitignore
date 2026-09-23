@@ -1,0 +1,4 @@
+# Transporte SIP propio de cada despliegue (IP anunciada, redes locales).
+# Se genera copiando pjsip_local.conf.example. No se versiona para que la
+# laptop de desarrollo y el servidor de produccion no se pisen las IPs.
+config/etc/asterisk/pjsip_local.conf
