@@ -1,4 +1,8 @@
 # Transporte SIP propio de cada despliegue (IP anunciada, redes locales).
-# Se genera copiando pjsip_local.conf.example. No se versiona para que la
-# laptop de desarrollo y el servidor de produccion no se pisen las IPs.
+# Se genera copiando pjsip_local.conf.example.
 config/etc/asterisk/pjsip_local.conf
+
+# Ajustes de red de la laptop de desarrollo (bridge + ports en Docker Desktop).
+# Se genera copiando compose.override.yaml.example. En el servidor NO debe
+# existir: alli manda el 'network_mode: host' de compose.yaml.
+compose.override.yaml

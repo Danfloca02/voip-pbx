@@ -1,0 +1,21 @@
+# Desarrollo en Windows con Docker Desktop.
+#
+# compose.yaml trae 'network_mode: host', que es lo correcto en el servidor
+# Linux pero NO funciona en Docker Desktop: el motor corre dentro de su propia
+# VM ('docker-desktop'), asi que 'host' es la red de ESA VM, no la de Windows
+# ni la de la distro WSL. El contenedor arranca, Asterisk escucha... y no lo
+# alcanza nadie. Sintoma: el softphone se queda en "connecting" para siempre.
+#
+# Este fichero se aplica SOLO en la laptop, y Compose lo carga automaticamente
+# si existe. Por eso no se versiona: en el servidor no debe existir.
+#
+#     cp compose.override.yaml.example compose.override.yaml
+#
+# Ver docs/TRONCALES.md §2.3
+services:
+  app:
+    # Sustituye al 'host' de compose.yaml.
+    network_mode: bridge
+    ports:
+      - "5060:5060/udp"
+      - "10000-10020:10000-10020/udp"

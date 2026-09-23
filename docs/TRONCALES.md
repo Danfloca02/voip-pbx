@@ -11,7 +11,7 @@ los fallos "de Asterisk" son en realidad fallos de red que se resuelven ahí.
 | Sección | Contenido |
 |---|---|
 | [1](#1-qué-es-una-troncal-en-pjsip) | Qué objetos componen una troncal en PJSIP |
-| [2](#2-preparar-la-red-obligatorio-en-todas-las-máquinas) | IPs, `compose.yaml`, firewall (Windows y **servidor Linux**), transporte PJSIP |
+| [2](#2-preparar-la-red-obligatorio-en-todas-las-máquinas) | IPs, red del contenedor (**Windows vs servidor Linux**), firewall, transporte PJSIP |
 | [3](#3-llamadas-entre-softphones-en-dos-laptops-distintas) | Softphones en dos laptops, **sin** troncal |
 | [4](#4-escenario-a--dos-pbx-en-la-misma-lan) | Troncal entre dos PBX en la misma LAN |
 | [5](#5-escenario-b--dos-pbx-en-redes-distintas) | Troncal entre redes distintas (NAT, registro, VPN) |
@@ -151,51 +151,155 @@ pública en la máquina, y entonces `ipconfig` sí te la da.
 > Grade NAT*. Abrir puertos en el router no servirá de nada porque no controlas
 > el NAT de arriba. La salida práctica es una VPN (§5.1).
 
-### 2.3 Configurar `compose.yaml`
+### 2.3 Configurar la red del contenedor
 
-**El repo viene configurado para el destino real: `network_mode: host`**, que
-es lo correcto en el servidor Linux de producción (§2.4.2). En Windows con
-Docker Desktop eso no funciona, así que para desarrollar en una laptop hay que
-sustituir esa línea por un bloque `ports:`.
+Aquí es donde Windows y el servidor Linux se separan. Es la causa número uno
+de *"el softphone se queda en **connecting** para siempre"*.
 
-**Sólo local** (un softphone en la misma máquina, nada entra de fuera):
+#### 2.3.1 Dos ficheros, un solo repo
 
-```yaml
-    ports:
-      - "127.0.0.1:5060:5060/udp"
-      - "127.0.0.1:10000-10020:10000-10020/udp"
-```
+La red **no se edita a mano** cada vez que se cambia de máquina: está repartida
+en dos ficheros que Compose combina solo.
 
-**Dos laptops / troncales** — quitar el bind a loopback para escuchar en todas
-las interfaces:
+| Fichero | Contenido | ¿Se versiona? | ¿Dónde manda? |
+|---|---|---|---|
+| `compose.yaml` | `network_mode: host` | Sí | Servidor Linux |
+| `compose.override.yaml` | `network_mode: bridge` + `ports:` | **No** (`.gitignore`) | Laptop Windows |
+| `compose.override.yaml.example` | Plantilla del anterior | Sí | — |
 
-```yaml
-    ports:
-      - "5060:5060/udp"
-      - "10000-10020:10000-10020/udp"
-```
+Compose carga `compose.override.yaml` **automáticamente** si existe, y lo que
+declare pisa a `compose.yaml`. Como no se versiona, en el servidor simplemente
+no existe y manda el `host` de `compose.yaml`. Nadie tiene que acordarse de
+revertir nada antes de desplegar.
 
-Aplicar el cambio (recrear el contenedor, no basta con `restart`):
+Es el mismo patrón que `pjsip_local.conf` (§2.5): lo que cambia por máquina
+vive fuera de los ficheros versionados.
+
+Para ver qué está aplicando Compose de verdad:
 
 ```bash
-make down && make up
-make check     # confirmar que aparece 0.0.0.0:5060->5060/udp
+docker compose config | grep -A4 network_mode
 ```
 
-Notas:
+#### 2.3.2 Windows con Docker Desktop
 
-- El rango RTP `10000-10020` son **21 puertos**. Cada llamada consume 2 (RTP y
-  RTCP), así que el tope real son ~10 llamadas simultáneas. Si hacen falta
-  más, hay que ampliar el rango **en los dos sitios a la vez**:
-  `rtp.conf` (`rtpstart`/`rtpend`) y `compose.yaml`. Publicar un rango grande
-  en Docker Desktop es lento de arrancar, así que conviene no pasarse.
-- Recuerda revertir a `network_mode: host` antes de desplegar en el servidor,
-  y ampliar el rango RTP de vuelta (`rtp.conf` trae `10000-20000`, pensado
-  para host; en bridge hay que reducirlo).
-- No uses `network_mode: host` **en Windows**: con Docker Desktop el motor
-  corre en su propia VM, no en la distro WSL, y el host de esa VM no es tu
-  Windows. En un **servidor Linux sí es la opción recomendada** y cambia
-  bastante las cosas — ver §2.4.2.
+**`network_mode: host` no funciona en Docker Desktop.** El motor no corre sobre
+tu Windows: corre dentro de su propia VM (`docker-desktop`). Con `host`, el
+contenedor se engancha a la red de **esa VM**, que no es ni tu Windows ni tu
+distro WSL. Asterisk arranca perfectamente, escucha en `0.0.0.0:5060`, y no lo
+alcanza nadie.
+
+> **Síntoma exacto:** el softphone se queda en *connecting* indefinidamente y
+> `docker compose logs` no muestra ni un solo `REGISTER`. En Wireshark (§8) el
+> `REGISTER` sale y no vuelve nada — ni siquiera un ICMP *port unreachable*.
+
+En la laptop, crear el override una sola vez:
+
+```bash
+cp compose.override.yaml.example compose.override.yaml
+make down && make up
+```
+
+Verificar que quedó publicado:
+
+```bash
+make check
+```
+
+Tiene que aparecer la columna de puertos con algo así:
+
+```
+0.0.0.0:5060->5060/udp, 0.0.0.0:10000-10020->10000-10020/udp
+```
+
+Si sale **vacía**, sigues en modo host y nada va a funcionar.
+
+**Prueba definitiva de que la PBX responde en la IP de LAN.**
+`Test-NetConnection` sólo prueba TCP (§2.4.1), así que no sirve para SIP. Este
+script manda un `OPTIONS` real por UDP; ejecutar desde WSL sustituyendo la IP:
+
+```bash
+python3 - <<'PY'
+import socket
+IP = "192.168.0.9"          # <-- IP de LAN de ESTA PBX
+msg = (f"OPTIONS sip:{IP} SIP/2.0\r\nVia: SIP/2.0/UDP {IP}:9999;branch=z9hG4bK-probe\r\n"
+       f"From: <sip:probe@{IP}>;tag=probe\r\nTo: <sip:{IP}>\r\nCall-ID: probe\r\n"
+       f"CSeq: 1 OPTIONS\r\nContact: <sip:probe@{IP}:9999>\r\nMax-Forwards: 70\r\n"
+       f"Content-Length: 0\r\n\r\n").encode()
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(4)
+s.bind((IP, 9999)); s.sendto(msg, (IP, 5060))
+try:
+    for l in s.recvfrom(4096)[0].decode(errors="replace").splitlines():
+        if l.lower().startswith(("sip/2.0", "via:")): print(l)
+except Exception as e:
+    print("SIN RESPUESTA:", type(e).__name__, "-> la PBX no es alcanzable")
+PY
+```
+
+Respuesta buena:
+
+```
+SIP/2.0 401 Unauthorized
+Via: SIP/2.0/UDP 192.168.0.9:9999;rport=52253;received=172.17.0.1;branch=z9hG4bK-probe
+```
+
+El `401` es **correcto**: significa que Asterisk está vivo y contestando. Un
+`OPTIONS` sin credenciales se rechaza, que es justo lo que queremos ver.
+
+Fíjate en `received=172.17.0.1`. Ahí está, medido y no supuesto, el reescribido
+de IP de origen de Docker Desktop: Asterisk **no** ve la IP real de quien le
+habla. Los softphones no se enteran (se autentican con usuario y clave), pero
+`type=identify` queda inservible — ver §4.2.
+
+#### 2.3.3 Pasar al servidor Linux
+
+En el servidor **no se crea** `compose.override.yaml`. Con eso solo ya manda
+`network_mode: host`. Resumen de lo que cambia:
+
+| | Laptop Windows | Servidor Linux |
+|---|---|---|
+| `compose.override.yaml` | se crea desde el `.example` | **no existe** |
+| Modo de red | `bridge` + `ports:` | `network_mode: host` |
+| IP de origen que ve Asterisk | reescrita a `172.17.0.1` | **la real** |
+| `type=identify` en troncales | inservible → variante B (§4.2) | funciona |
+| `local_net` en `pjsip_local.conf` | comentado | **descomentado** |
+| `external_*` | IP de LAN (§2.1) | IP pública (§2.2) |
+| Rango RTP (`rtp.conf`) | `10000-10020` | hasta `10000-20000`, sale gratis |
+| Firewall | Windows Defender (§2.4.1) | `ufw` / `firewalld` (§2.4.2) |
+| Docker se salta el firewall | Sí (modo bridge) | No (§2.4.2) |
+
+Despliegue limpio en el servidor:
+
+```bash
+git clone <repo> && cd voip-pbx
+
+# 1. NO crear compose.override.yaml. Es lo único que hay que "no hacer".
+
+# 2. Transporte propio del servidor
+cp config/etc/asterisk/pjsip_local.conf.example \
+   config/etc/asterisk/pjsip_local.conf
+```
+
+Dentro de `pjsip_local.conf`: `external_*` con la **IP pública** y
+`local_net` **descomentado** con la LAN de la sede (§2.5).
+
+```bash
+# 3. Opcional: ampliar el rango RTP, que en host no cuesta nada
+#    rtp.conf -> rtpend=20000
+
+# 4. Arrancar
+make build && make up
+
+# 5. Verificar que escucha en la pila del HOST, no en una bridge
+sudo ss -ulnp | grep 5060
+make check          # la columna de puertos debe salir VACÍA: es lo correcto
+```
+
+En host networking `make check` **no** muestra puertos publicados, y eso es
+señal de que está bien. Lo que confirma que funciona es `ss` en el host.
+
+Luego el firewall (§2.4.2) y, si el servidor está en cloud, el grupo de
+seguridad en **UDP** (§2.4.2).
 
 ### 2.4 Reglas de puertos UDP en el firewall
 
@@ -256,6 +360,9 @@ Remove-NetFirewallRule -DisplayName "Asterisk RTP (UDP 10000-10020)"
 ```
 
 #### 2.4.2 Servidor Linux con Docker
+
+> Requisito previo: §2.3.3, es decir **no** crear `compose.override.yaml` en
+> el servidor, para que mande el `network_mode: host` de `compose.yaml`.
 
 En un servidor Linux dedicado el planteamiento cambia, y para mejor: Docker
 corre directamente sobre el kernel del host, sin VM intermedia.
@@ -576,37 +683,48 @@ pjsip reload
 pjsip show transports
 ```
 
-> ### Aviso: Docker Desktop puede romper la autenticación por IP
+> ### Aviso: en Docker Desktop la autenticación por IP NO funciona
 >
-> Docker Desktop no corre sobre tu Windows directamente sino dentro de su
-> propia VM, y el reenvío de puertos suele **reescribir la IP de origen** de
-> los paquetes entrantes. Asterisk entonces ve todas las llamadas llegando
-> desde la puerta de enlace de Docker (`172.17.0.1` o similar) en vez de desde
-> la IP real de la otra laptop.
+> Esto no es un riesgo teórico: está **medido** en este proyecto (§2.3.2). La
+> respuesta de Asterisk a un `OPTIONS` enviado desde la propia LAN vuelve con:
 >
-> Si eso pasa, un `type=identify` con `match=192.168.1.20` **nunca coincidirá**
-> y las llamadas entrantes se rechazarán.
+> ```
+> Via: SIP/2.0/UDP 192.168.0.9:9999;rport=52253;received=172.17.0.1;...
+> ```
 >
-> Cómo comprobarlo, en la PBX que recibe:
+> El parámetro `received=` es la IP que Asterisk **realmente** ve. Docker
+> Desktop reenvía los puertos desde su propia VM y reescribe el origen, así que
+> todo el mundo —softphones, la otra PBX, el proveedor— llega como
+> `172.17.0.1`.
+>
+> Consecuencias:
+>
+> | | ¿Afectado? | Por qué |
+> |---|---|---|
+> | Registro de softphones | No | Se autentican con usuario y clave |
+> | `rtp_symmetric` / `rewrite_contact` | No | Ya trabajan sobre la IP vista |
+> | `type=identify` en troncales | **Sí, inservible** | `match=` nunca coincide |
+>
+> Para comprobarlo en tu máquina, o mirar el `received=` del script de §2.3.2,
+> o desde la PBX que recibe:
 >
 > ```
 > make cli
 > pjsip set logger on
 > ```
 >
-> Provoca una llamada o un registro desde la otra máquina y mira la línea
-> `<--- Received SIP request ... from <IP> --->`. Si esa IP no es la de la otra
-> laptop, estás en este caso.
+> y provocar una llamada desde la otra máquina: la línea
+> `<--- Received SIP request ... from <IP> --->` dirá la verdad.
 >
 > Tres salidas, de mejor a peor:
 >
-> 1. **Usar autenticación por usuario/clave** en lugar de por IP: variante B de
->    `trunk_sip` en `pjsip.conf` (`auth` + `aor-troncal-dinamica`). Funciona
->    sin depender de la IP de origen y es lo recomendable.
-> 2. **Docker Engine nativo** en lugar de Docker Desktop: conserva la IP de
->    origen. Dentro de WSL hay que instalarlo y arrancarlo a mano; en un
->    servidor Linux es lo normal, y con `network_mode: host` (§2.4.2) el
->    problema no existe en absoluto.
+> 1. **Autenticación por usuario/clave** en lugar de por IP: variante B de
+>    `trunk_sip` en `pjsip.conf` (`auth` + `aor-troncal-dinamica`). No depende
+>    de la IP de origen, y es lo recomendable mientras se desarrolle en
+>    Windows. Ver §4.2.
+> 2. **Servidor Linux con `network_mode: host`** (§2.3.3): la IP de origen se
+>    conserva y el problema desaparece. Es el destino real del proyecto, así
+>    que la variante A vuelve a ser válida allí.
 > 3. **`match=` la IP de la gateway de Docker**: funciona en un laboratorio
 >    cerrado, pero deja de ser un control de acceso real — aceptaría llamadas
 >    de cualquier origen. No lo dejes así fuera de pruebas.
@@ -617,8 +735,9 @@ En **ambas** laptops:
 
 - [ ] `ipconfig` da una IPv4 y la anotaste (§2.1)
 - [ ] `ping` de una laptop a la otra responde (§2.1)
-- [ ] `compose.yaml` sin el bind a `127.0.0.1` (§2.3)
-- [ ] `make check` muestra `0.0.0.0:5060->5060/udp` (§2.3)
+- [ ] `compose.override.yaml` creado desde el `.example` (§2.3.2)
+- [ ] `make check` muestra `0.0.0.0:5060->5060/udp` (§2.3.2)
+- [ ] El script `OPTIONS` de §2.3.2 devuelve `401 Unauthorized`
 - [ ] Reglas de firewall UDP 5060 y 10000-10020 creadas (§2.4)
 - [ ] Perfil de red en `Private` (§2.4)
 - [ ] `pjsip_local.conf` creado desde el `.example`, con la IP real (§2.5)
@@ -626,7 +745,9 @@ En **ambas** laptops:
 
 Si el destino es un **servidor Linux** en vez de dos laptops (§2.4.2):
 
-- [ ] `network_mode: host` en `compose.yaml`, sin bloque `ports:`
+- [ ] **NO** existe `compose.override.yaml` en el servidor (§2.3.3)
+- [ ] `make check` con la columna de puertos vacía, y `ss -ulnp | grep 5060` con Asterisk
+- [ ] `local_net` **descomentado** en `pjsip_local.conf` (§2.5)
 - [ ] `pjsip_local.conf` del servidor con la IP **pública** en `external_*`
       y la LAN de la sede en `local_net` (§2.5)
 - [ ] `ufw` / `firewalld` con UDP 5060 y el rango RTP, restringidos por IP de origen
@@ -750,9 +871,87 @@ endpoint=trunk_sip
 match=192.168.1.10
 ```
 
-> Si el aviso del §2.5 se cumple y Asterisk ve las llamadas llegando desde la
-> gateway de Docker, usa la variante B (usuario/clave) en ambos lados en lugar
-> de `identify`.
+#### Si desarrollas en Windows, esto no va a funcionar
+
+Las dos variantes de arriba dependen de `type=identify`, y en Docker Desktop
+`identify` está roto: Asterisk ve todo el tráfico llegando desde `172.17.0.1`
+(§2.3.2, §2.5). Las llamadas **salientes** funcionarán y las **entrantes** se
+rechazarán como anónimas. Una troncal a medias, que es peor que una rota,
+porque parece un problema de dialplan.
+
+Mientras las dos PBX corran en laptops Windows, usar la **variante B** en
+ambos lados: autenticación por usuario y clave, que no depende de la IP.
+
+Hay que decidir **quién hace de servidor**. Da igual cuál, pero tiene que ser
+uno solo. Aquí, PBX A (Caracas) hace de servidor.
+
+**PBX A — servidor.** La otra sede se registra contra ella:
+
+```ini
+[trunk_sip](endpoint-troncal)
+context=entrantes_troncal_sip
+aors=trunk_sip
+auth=trunk_sip-auth
+
+[trunk_sip](aor-troncal-dinamica)     ; sin contact: se aprende del REGISTER
+
+[trunk_sip-auth]
+type=auth
+auth_type=userpass
+username=sede_maracaibo
+password=UNA_CLAVE_LARGA_Y_ALEATORIA
+```
+
+**PBX B — cliente.** Se registra contra A y le manda las llamadas:
+
+```ini
+[trunk_sip](endpoint-troncal)
+context=entrantes_troncal_sip
+aors=trunk_sip
+outbound_auth=trunk_sip-auth
+from_user=sede_maracaibo
+
+[trunk_sip](aor-troncal-lan)
+contact=sip:192.168.0.9:5060          ; IP de la PBX A
+
+[trunk_sip-auth]
+type=auth
+auth_type=userpass
+username=sede_maracaibo
+password=UNA_CLAVE_LARGA_Y_ALEATORIA  ; idéntica a la de A
+
+[trunk_sip-reg]
+type=registration
+transport=transport-udp
+outbound_auth=trunk_sip-auth
+server_uri=sip:192.168.0.9
+client_uri=sip:sede_maracaibo@192.168.0.9
+retry_interval=60
+```
+
+La clave tiene que ser **la misma cadena exacta** en las dos máquinas. No uses
+el nombre de la sede ni nada adivinable: §7.
+
+Verificar, en A:
+
+```
+pjsip show aors            ; trunk_sip debe tener un contacto aprendido
+pjsip show contacts
+```
+
+Y en B:
+
+```
+pjsip show registrations   ; debe decir "Registered"
+```
+
+Si B dice `Rejected` o `Unregistered`, es la clave o es red (§2.4). Si dice
+`Registered` pero A no muestra contacto, recarga A con `pjsip reload`.
+
+> **En el servidor Linux vuelve la variante A.** Con `network_mode: host`
+> (§2.3.3) la IP de origen se conserva, `identify` funciona, y la troncal por
+> IP es más simple y no tiene credenciales que rotar. La variante B es una
+> concesión al entorno de desarrollo, no el diseño final.
 
 ### 4.3 Enrutar el plan de numeración por la troncal
 
@@ -799,7 +998,7 @@ dialplan show llamadas_internas
 ```
 
 Si `trunk_sip` aparece **Unavailable**, el `qualify` no recibe respuesta: es
-red, no Asterisk. Repasa §2.3 (puertos aún en loopback), §2.4 (firewall) y la
+red, no Asterisk. Repasa §2.3.2 (falta `compose.override.yaml`), §2.4 (firewall) y la
 IP del `contact`.
 
 Prueba final: desde el softphone registrado en 1001, marcar `2001`.
@@ -951,16 +1150,17 @@ PBX:
 | Síntoma | Causa más probable |
 |---|---|
 | `ping` entre laptops falla | Firewall de Windows, o aislamiento de clientes en el router WiFi (§2.1) |
-| `make check` no muestra `0.0.0.0:5060` | `compose.yaml` sigue con el bind a `127.0.0.1` (§2.3) |
-| El softphone no registra | Puerto cerrado (§2.3/§2.4), IP del servidor equivocada, o clave incorrecta |
+| El softphone se queda en **connecting** para siempre | Falta `compose.override.yaml`: en Docker Desktop `network_mode: host` no es alcanzable (§2.3.2) |
+| `make check` con la columna de puertos vacía **en Windows** | Falta `compose.override.yaml` (§2.3.2). En el servidor Linux eso es lo correcto (§2.3.3) |
+| El softphone no registra | Puerto cerrado (§2.3.2/§2.4), IP del servidor equivocada, o clave incorrecta |
 | `Unavailable` en `pjsip show endpoints` | El `qualify` no recibe respuesta: firewall, IP equivocada, o puertos en loopback |
 | Timbra y contesta pero **no hay audio** | `external_media_address` mal puesto (§2.5), o rango RTP cerrado en el firewall |
 | Audio en **un solo sentido** | NAT: falta `rtp_symmetric` / `direct_media=no` en un extremo |
 | `401 Unauthorized` repetido | Usuario o clave incorrectos en el `auth` |
-| `403 Forbidden` en llamadas entrantes | Falta el `identify`, o el `match=` no corresponde a la IP real de origen — ver el aviso de Docker Desktop en §2.5 |
+| `403 Forbidden` / llamadas entrantes anónimas, pero las salientes funcionan | En Docker Desktop `identify` nunca casa: Asterisk ve `172.17.0.1`. Usar variante B (§4.2) o desplegar en Linux con host (§2.3.3) |
 | `404 Not Found` desde el otro extremo | El dialplan del otro lado no tiene ruta para esa extensión (§4.3) |
 | `488 Not Acceptable Here` | No hay codec en común: revisar `[codec-troncal]` contra lo que ofrece el otro lado |
-| Fallan las llamadas a partir de la décima | El rango RTP sólo tiene 21 puertos, ~10 llamadas (§2.3 / §2.4.2) |
+| Fallan las llamadas a partir de la quinta | `10000-10020` son 11 puertos pares = 11 streams, y con `direct_media=no` cada llamada gasta 2 (§2.3.3) |
 | `ufw status` dice `deny` pero el puerto responde desde fuera | Docker en modo bridge se salta `ufw`: filtrar en `DOCKER-USER` o usar `network_mode: host` (§2.4.2) |
 | En cloud: registra desde la LAN pero no desde internet | Grupo de seguridad sin UDP abierto, o el proveedor bloquea el 5060 (§2.4.2) |
 
