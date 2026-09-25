@@ -1,8 +1,14 @@
-# Transporte SIP propio de cada despliegue (IP anunciada, redes locales).
-# Se genera copiando pjsip_local.conf.example.
+# Transporte SIP de cada maquina (IP anunciada, redes locales, certificados).
+# Se crea copiando pjsip_local.conf.example. Ver docs/DESPLIEGUE.md
 config/etc/asterisk/pjsip_local.conf
 
-# Ajustes de red de la laptop de desarrollo (bridge + ports en Docker Desktop).
-# Se genera copiando compose.override.yaml.example. En el servidor NO debe
-# existir: alli manda el 'network_mode: host' de compose.yaml.
+# Red del contenedor en la laptop de desarrollo (bridge + ports).
+# Se crea copiando compose.override.yaml.example. En el servidor NO debe existir.
 compose.override.yaml
+
+# Certificados TLS: se generan por maquina, nunca se versionan.
+config/etc/asterisk/keys/
+
+# Artefactos
+build.log
+*.pcap

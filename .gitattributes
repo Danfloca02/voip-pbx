@@ -1,0 +1,8 @@
+# Normaliza a LF en el repo. Sin esto, editar en Windows reescribe ficheros
+# enteros a CRLF y los diffs salen con miles de lineas que nadie toco.
+* text=auto eol=lf
+
+# Binarios: que git no los toque.
+*.pcap  binary
+*.crt   binary
+*.key   binary
