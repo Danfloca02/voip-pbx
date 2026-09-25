@@ -128,7 +128,7 @@ Un solo interruptor: **que exista o no `compose.override.yaml`**.
 cp compose.override.yaml.example compose.override.yaml
 # comentar local_net en pjsip_local.conf
 make down && make up
-make check     # debe mostrar 0.0.0.0:5060->5060/udp
+make check # debe mostrar 0.0.0.0:5060->5060/udp
 ```
 
 ### Pasar a host
@@ -274,13 +274,6 @@ sudo firewall-cmd --reload
 > sus cadenas, así que un puerto publicado queda accesible aunque el firewall
 > lo tenga denegado. Con `network_mode: host` el tráfico pasa por `INPUT` y el
 > firewall recupera el control. Si te quedas en bridge, filtra en `DOCKER-USER`.
-
-### Proveedor cloud
-
-Si el servidor está en AWS, Azure, GCP, DigitalOcean o Hetzner hay una segunda
-capa fuera de la máquina que Docker no puede saltarse. Abrir ahí los mismos
-puertos **en UDP**: muchos proveedores abren TCP por defecto y dejan UDP
-cerrado, y algunos bloquean el 5060 de entrada hasta que lo pides.
 
 ---
 
