@@ -1,5 +1,11 @@
 # Troncales SIP y llamadas entre dos laptops
 
+> **ALCANCE.** Este proyecto no usa proveedor SIP comercial ni sale a la
+> telefonía tradicional. La sección 6 (proveedor) queda como referencia
+> teórica, no como parte del despliegue. Cuando se habla de "internet" son dos
+> PBX de este repo entre IPs públicas.
+> Ver [ESTRUCTURA.md](ESTRUCTURA.md) §1 y [DESPLIEGUE.md](DESPLIEGUE.md) §7.
+
 Guía práctica para que dos máquinas con este repo (o una máquina y un
 proveedor SIP) puedan llamarse entre sí, en la misma LAN o en redes distintas.
 
@@ -1116,8 +1122,12 @@ dato:
 | Codecs soportados | Ya cubierto por `[codec-troncal]` (ulaw, alaw) |
 | Formato del número a marcar | Determina si hace falta manipular `${EXTEN:1}` |
 
-Ese bloque ya está escrito y comentado como `trunk_redpublica` en la sección
-5.1 de `pjsip.conf`, usando `[aor-troncal-externa]`.
+> **Este bloque ya no está en `pjsip.conf`.** Se eliminó junto con los
+> contextos `salientes_redpublica` / `entrantes_redpublica` al quedar el
+> proveedor fuera de alcance, y con ellos se liberó el prefijo `9`. Esta
+> sección se conserva como referencia por si algún día entra un operador: la
+> plantilla a usar sería `[aor-troncal-externa]`, y haría falta crear de nuevo
+> un contexto de entrada propio y su ruta de salida.
 
 ---
 
@@ -1127,9 +1137,9 @@ Cuatro reglas que evitan el fraude telefónico, el riesgo real de exponer una
 PBX:
 
 1. **El contexto de entrada de una troncal nunca incluye rutas de salida.**
-   Por eso `[entrantes_redpublica]` y `[entrantes_troncal_sip]` no tienen
-   ningún `include => salientes_*`. Si se añade, cualquiera que alcance tu
-   troncal puede hacer llamadas internacionales a tu costa.
+   Por eso `[entrantes_troncal_sip]` no tiene ningún `include => salientes_*`.
+   Si se añade, cualquiera que alcance tu troncal puede sacar llamadas por
+   ella. Es la regla que hay que respetar si algún día se añade un proveedor.
 2. **Con autenticación por IP, el `identify` es el único control de acceso.**
    Un `match=` demasiado amplio (una red `/16`, o la gateway de Docker)
    equivale a no tener control.

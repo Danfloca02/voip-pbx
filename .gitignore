@@ -12,3 +12,12 @@ config/etc/asterisk/keys/
 # Artefactos
 build.log
 *.pcap
+
+# Logs y CDR de Asterisk. Los subdirectorios cdr-csv/ y cdr-custom/ los crea
+# 'make logdirs' en cada arranque: si faltan, el CDR falla.
+logs/
+
+# Ficheros temporales de editor
+*.swp
+*.swo
+*~

@@ -29,13 +29,14 @@ services:
     # En Windows con Docker Desktop esto NO funciona: el motor corre en su
     # propia VM y 'host' seria la red de esa VM. Para desarrollo en Windows,
     # usar el bloque 'ports:' de docs/TRONCALES.md §2.3 en su lugar.
-    # network_mode: host
-    ports:
-      - "5060:5060/udp"
-      - "5061:5061/tcp"
-      - "10000-10050:10000-10050/udp"
+    network_mode: host
+    # ports:
+    #   - "5060:5060/udp"
+    #   - "5061:5061/tcp"
+    #   - "10000-10050:10000-10050/udp"
     volumes:
       - ./config/etc/asterisk:/etc/asterisk
+      - ./logs/var/log/asterisk:/var/log/asterisk
     # secrets:
     #   db-password:
     #     file: db/password.txt

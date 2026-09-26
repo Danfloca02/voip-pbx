@@ -1,21 +1,25 @@
-; Transporte SIP. UNICO fichero que cambia entre maquinas: no se versiona.
-;   cp pjsip_local.conf.example pjsip_local.conf
-; Guia: docs/DESPLIEGUE.md
+; Transporte SIP. UNICO fichero con valores propios de cada maquina.
+; No se versiona:   cp pjsip_local.conf.example pjsip_local.conf
+; Guia completa: docs/DESPLIEGUE.md
+
+;=============================================================================
+; CASO 1 — ENTREGA: servidor Linux, network_mode: host, IP publica en la NIC
+;=============================================================================
+; Comprobar PRIMERO en el servidor:
+;
+;     ip -br -4 addr
+;
+; Si la IP publica aparece ahi, lo de abajo es TODO lo que hace falta.
+; Sin external_* ni local_net, Asterisk elige la direccion a anunciar segun el
+; destino de cada llamada, usando la tabla de rutas:
+;   - telefono en la LAN de la sede -> le anuncia la IP privada
+;   - la otra sede por internet     -> le anuncia la IP publica
+; Los dos casos correctos, sin configurar nada. No hay IPs en este fichero.
 
 [transport-udp]
 type=transport
 protocol=udp
 bind=0.0.0.0:5060
-; MI direccion, la que ven los demas. Nunca la del otro extremo.
-;   LAN          -> IP de esta maquina        (ipconfig / ip -br addr)
-;   IP publica   -> IP publica                (curl -4 ifconfig.me)
-;   Tras NAT     -> IP publica del router + port forwarding
-external_media_address=CAMBIAR_IP
-external_signaling_address=CAMBIAR_IP
-; Redes propias: dentro anuncia la IP privada, fuera la de external_*.
-; Necesario para atender LAN e internet a la vez.
-; DESCOMENTAR solo con network_mode: host. En bridge anunciaria 172.17.0.x.
-;local_net=192.168.0.0/24
 
 [transport-tls]
 type=transport
@@ -24,7 +28,26 @@ bind=0.0.0.0:5061
 cert_file=/etc/asterisk/keys/asterisk.crt
 priv_key_file=/etc/asterisk/keys/asterisk.key
 method=tlsv1_2
-; Mismas direcciones que el transporte UDP.
-external_media_address=CAMBIAR_IP
-external_signaling_address=CAMBIAR_IP
-;local_net=192.168.0.0/24
+
+;=============================================================================
+; CASO 2 — detras de NAT: Docker bridge, router domestico, EC2/GCP
+;=============================================================================
+; Si 'ip -br -4 addr' NO muestra la IP publica, Asterisk no puede averiguarla
+; y hay que decirsela. Añadir a AMBOS transportes de arriba:
+;
+;     external_media_address=IP_PUBLICA_O_LAN
+;     external_signaling_address=IP_PUBLICA_O_LAN
+;
+; Si ademas hay extensiones en la LAN del servidor, declarar esa red:
+;
+;     local_net=192.168.0.0/24
+;
+; REGLA: los dos juntos o ninguno.
+;   ni external_* ni local_net -> correcto (caso 1)
+;   external_* CON local_net   -> correcto
+;   external_* SIN local_net   -> ROTO: anuncia la publica a los telefonos de
+;                                 la LAN y el audio hace hairpin en el router
+;
+; EXCEPCION Docker bridge: NO poner local_net. Ahi la direccion "real" de
+; Asterisk es la del contenedor (172.17.0.x) y se la anunciaria a la LAN.
+; Solo external_* con la IP de la maquina.

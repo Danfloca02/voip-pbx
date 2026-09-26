@@ -4,7 +4,8 @@ Guía operativa: qué ficheros se crean en cada máquina, dónde va cada IP, có
 alternar entre `host` y `bridge`, qué abrir en el firewall, y cómo probar los
 cuatro escenarios.
 
-Para el detalle conceptual de troncales, ver [TRONCALES.md](TRONCALES.md).
+Estructura de ficheros y contextos: [ESTRUCTURA.md](ESTRUCTURA.md).
+Detalle conceptual de troncales: [TRONCALES.md](TRONCALES.md).
 
 | Sección | Contenido |
 |---|---|
@@ -13,9 +14,10 @@ Para el detalle conceptual de troncales, ver [TRONCALES.md](TRONCALES.md).
 | [3](#3-host-o-bridge) | Alternar modo de red |
 | [4](#4-por-sistema-operativo) | Windows / Linux |
 | [5](#5-firewall) | Reglas de puertos |
-| [6](#6-red-pública) | IP pública, NAT, CGNAT |
-| [7](#7-los-cuatro-escenarios) | Pruebas de los 4 escenarios |
-| [8](#8-verificación-y-diagnóstico) | Comandos y tabla de síntomas |
+| [6](#6-salir-a-internet-ip-pública-y-nat) | IP pública, NAT, CGNAT |
+| [7](#7-el-dialplan-y-los-contextos) | Contextos, códigos y qué cambia de LAN a internet |
+| [8](#8-los-cuatro-escenarios) | Pruebas de los 4 escenarios |
+| [9](#9-verificación-y-diagnóstico) | Comandos y tabla de síntomas |
 
 ---
 
@@ -69,8 +71,8 @@ se llama a sí misma.
 | `external_media_address` | `pjsip_local.conf` | Mi IP: LAN o pública |
 | `external_signaling_address` | `pjsip_local.conf` | La misma |
 | `local_net` | `pjsip_local.conf` | Mi red, en formato red/máscara |
-| `contact=` | `pjsip.conf` | IP de la otra PBX o del proveedor |
-| `match=` | `pjsip.conf` | IP de quien acepto llamadas |
+| `contact=` | `pjsip.conf` | IP de la otra PBX |
+| `match=` | `pjsip.conf` | IP de la otra PBX, de quien acepto |
 
 `bind=0.0.0.0:5060` no se toca nunca: significa "escucha en todas mis
 interfaces" y es correcto siempre.
@@ -89,22 +91,29 @@ En Windows, ignorar los adaptadores `vEthernet (WSL)`, los de Docker y los de
 VPN: no son alcanzables desde fuera. Dentro de WSL, `hostname -I` da una IP
 `172.x` que **no sirve** para que otra máquina te alcance.
 
-### Qué hace `local_net`
+### `external_*` y `local_net`: los dos juntos o ninguno
 
-Es lo que permite atender LAN e internet a la vez:
+Estos dos parámetros son un par. `external_*` dice *qué dirección anuncio* y
+`local_net` dice *a quién NO se la anuncio*. **`local_net` no hace nada si
+`external_*` no está puesto.**
 
-| Destino | Qué anuncia Asterisk |
-|---|---|
-| Dentro de `local_net` | Su IP privada real |
-| Fuera de `local_net` | `external_*` |
+| Configuración | Teléfono en la LAN | Otra sede por internet |
+|---|---|---|
+| **Ninguno de los dos** | IP privada de la interfaz ✅ | IP pública ✅ |
+| `external_*` **sin** `local_net` | IP pública ❌ hairpin | IP pública ✅ |
+| `external_*` **con** `local_net` | IP privada ✅ | IP pública ✅ |
 
-Sin `local_net`, Asterisk anuncia la IP pública también a los teléfonos de la
-propia LAN: el audio sale al router para volver a entrar y muchos routers lo
-descartan.
+La primera y la tercera funcionan igual. **La rota es la del medio.**
 
-> **`local_net` sólo con `network_mode: host`.** En bridge la "IP real" de
-> Asterisk es la del contenedor (`172.17.0.x`), así que anunciaría esa y no
-> habría audio. En bridge: dejarlo comentado.
+**En el escenario de entrega no se pone ninguno de los dos.** Sin `external_*`,
+Asterisk elige la dirección según el destino de cada llamada usando la tabla de
+rutas: privada para los teléfonos de la sede, pública para la otra sede. Los dos
+casos correctos, sin configurar nada.
+
+Esos parámetros existen para **falsear** la respuesta cuando Asterisk no puede
+averiguarla, es decir cuando hay NAT delante. Sin NAT no hacen falta.
+
+Cuándo sí son obligatorios: §6.
 
 ---
 
@@ -277,15 +286,61 @@ sudo firewall-cmd --reload
 
 ---
 
-## 6. Red pública
+## 6. Salir a internet (IP pública y NAT)
 
-### Con IP pública directa en la máquina
+> Esto es **PBX de este proyecto contra otra PBX de este proyecto** por
+> internet. No hay proveedor SIP ni PSTN en el alcance (§7).
+
+### La comprobación que lo decide todo
+
+En cada servidor:
+
+```bash
+ip -br -4 addr
+```
+
+| Lo que muestra | Qué hacer |
+|---|---|
+| **La IP pública aparece ahí** | **Nada.** Sin `external_*` ni `local_net` (§2) |
+| Sólo `10.x` / `172.x` / `192.168.x` y la pública está fuera | Poner el par (abajo) |
+
+El primer caso es el habitual en servidor dedicado y en VPS tipo Hetzner,
+DigitalOcean o Linode. El segundo es el habitual en **AWS EC2 y GCP**: la NIC
+lleva una IP privada y el proveedor NATea la pública por fuera, así que Asterisk
+no puede conocerla.
+
+### Con IP pública directa en la NIC — escenario de entrega
+
+`pjsip_local.conf` se queda sin una sola IP:
 
 ```ini
-; pjsip_local.conf
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+
+[transport-tls]
+type=transport
+protocol=tls
+bind=0.0.0.0:5061
+cert_file=/etc/asterisk/keys/asterisk.crt
+priv_key_file=/etc/asterisk/keys/asterisk.key
+method=tlsv1_2
+```
+
+Las únicas IPs del proyecto pasan a ser el `contact=` y el `match=` de la otra
+sede, en `pjsip.conf`.
+
+Requisito: **ninguna VPN en el servidor.** Si algo instala una ruta por defecto,
+Asterisk puede elegir la interfaz del túnel y anunciar su dirección.
+
+### Con la pública fuera de la NIC
+
+```ini
+; en AMBOS transportes
 external_media_address=200.44.x.x
 external_signaling_address=200.44.x.x
-local_net=192.168.0.0/24        ; la LAN interna, si la hay
+local_net=192.168.0.0/24        ; sólo si hay extensiones en la LAN
 ```
 
 ### Detrás de NAT (router doméstico)
@@ -316,7 +371,77 @@ Un 5060 público recibe intentos de registro automatizados en horas.
 
 ---
 
-## 7. Los cuatro escenarios
+## 7. El dialplan y los contextos
+
+Esta sección responde a la duda más frecuente al pasar de LAN a internet:
+**el dialplan no cambia.** Nada de lo que se explica en §6 toca
+`extensions.conf`.
+
+### Aviso sobre el vocabulario
+
+En este proyecto **no hay proveedor SIP ni salida a la telefonía tradicional**.
+Cuando la documentación dice *"por internet"* se refiere a dos PBX de este
+mismo repo hablándose entre IPs públicas.
+
+Existieron los contextos `salientes_redpublica` y `entrantes_redpublica` para
+una troncal con operador; se eliminaron por estar fuera de alcance, y el
+prefijo `9` quedó libre.
+
+### Los cuatro contextos
+
+```
+[llamadas_internas]           <- donde entran las extensiones
+    include => salientes_troncal_sip
+[salientes_troncal_sip]       <- prefijo 8: salida hacia la otra sede
+[entrantes_troncal_sip]       <- entrada de llamadas de la otra sede
+[qos-handler]                 <- subrutina de calidad (definida, sin invocar)
+```
+
+Lo que se puede marcar desde un softphone:
+
+| Se marca | Qué ocurre |
+|---|---|
+| `1XXX`–`5XXX` | Llama a la extensión, con desvío y buzón |
+| `800` | Sala de conferencia |
+| `*72<ext>` / `*73` | Activa / desactiva desvío |
+| `*97` | Tu propio buzón |
+| `*98` / `*98<ext>` | Buzón preguntando / de una extensión |
+| `8<ext>` | Sale por la troncal hacia la otra sede |
+| `#1` / `#2` / `#9` | En llamada: transferencia ciega / consultada / colgar |
+
+Detalle completo de cada contexto en [ESTRUCTURA.md](ESTRUCTURA.md) §4.
+
+### Qué cambia de LAN a internet
+
+La troncal es **la misma** en los dos casos. Lo único que cambia son las
+direcciones y el camino de red:
+
+| | Misma LAN | Por internet |
+|---|---|---|
+| `external_*` en `pjsip_local.conf` | IP de LAN | **IP pública** |
+| `local_net` en `pjsip_local.conf` | tu LAN | tu LAN (igual) |
+| `contact=` en `pjsip.conf` | IP de LAN de la otra PBX | **IP pública de la otra** |
+| `match=` en `pjsip.conf` | IP de LAN de la otra PBX | **IP pública de la otra** |
+| Plantilla de AOR | `aor-troncal-lan` | `aor-troncal-externa` |
+| Prefijo para marcar | `8` | `8`, el mismo |
+| `extensions.conf` | — | **sin un solo cambio** |
+| Router / firewall | reglas locales (§5) | + port forwarding (§6) |
+
+Una PBX no sabe si el paquete cruzó internet o un switch: sólo ve una IP. Por
+eso el escenario público es un problema de direccionamiento y NAT, no de plan
+de marcado.
+
+### Una regla de seguridad que no se debe romper
+
+`[entrantes_troncal_sip]` **no incluye ningún contexto de salida**, y es
+deliberado. Un `include` a un contexto de salida dentro de un contexto de
+entrada permitiría que quien entre por la troncal saque llamadas por ella. Es
+la vía clásica del fraude telefónico, y es el error que hay que evitar si algún
+día se añade un proveedor.
+
+---
+
+## 8. Los cuatro escenarios
 
 ### Escenario 1 — Misma LAN, una PBX
 
@@ -399,7 +524,7 @@ En la PBX B al revés. Entre sedes se envía la extensión **completa**, sin
 Si `trunk_sip` queda `Unavailable`, es red: firewall, IP del `contact`, o la
 otra PBX apagada. No es dialplan.
 
-### Escenario 3 — PBX con red pública, softphones en otra red
+### Escenario 3 — PBX con IP pública, softphones en otra red
 
 ```
   [ PBX  IP pública 200.44.x.x ]
@@ -430,47 +555,114 @@ en un sentido, es `local_net` o el rango RTP sin abrir.
 
 Cambiar las claves antes de esta prueba. El 5060 queda expuesto.
 
-### Escenario 4 — Dos PBX públicas, un softphone en cada LAN
+### Escenario 4 — Dos PBX con IP pública, un softphone en cada LAN
+
+**Éste es el escenario de entrega.** Dos servidores Linux, Docker Engine nativo,
+`network_mode: host`, IP pública fija en la NIC de cada uno.
 
 ```
-  [ PBX A  200.44.x.x ]  ←── trunk_sip ──→  [ PBX B  190.x.x.x ]
-     │ LAN 192.168.0.0/24                      │ LAN 10.0.0.0/24
-   1001                                       2001
+  [ PBX A  IP_A ]  ←── trunk_sip ──→  [ PBX B  IP_B ]
+     │ LAN 192.168.0.0/24                │ LAN 10.0.0.0/24
+   1001                                 2001
 ```
 
-**Configuración.** En cada lado:
+#### Ficheros por servidor
 
-| Parámetro | PBX A | PBX B |
+| Fichero | Sede A | Sede B |
 |---|---|---|
-| `external_*` | `200.44.x.x` | `190.x.x.x` |
-| `local_net` | `192.168.0.0/24` | `10.0.0.0/24` |
-| `contact=` | `sip:190.x.x.x:5060` | `sip:200.44.x.x:5060` |
-| `match=` | `190.x.x.x` | `200.44.x.x` |
+| `compose.override.yaml` | **no existe** | **no existe** |
+| `pjsip_local.conf` | sin IPs (§6) | sin IPs (§6) |
+| `keys/` | generado en A | generado en B |
+| `contact=` / `match=` | `IP_B` | `IP_A` |
 
-La plantilla del AOR pasa a ser `aor-troncal-externa`, que tiene el
-`qualify_timeout` más holgado para la latencia de internet.
+Comprobar antes de nada que `ip -br -4 addr` muestra la pública en los dos.
 
-Si alguno de los dos no tiene IP fija, ese lado usa la variante B y se registra
-contra el que sí la tiene.
+#### Troncal — variante A en los dos lados
 
-**Prueba.**
+Sede A:
+
+```ini
+[trunk_sip](endpoint-troncal)
+context=entrantes_troncal_sip
+aors=trunk_sip
+
+[trunk_sip](aor-troncal-externa)
+contact=sip:IP_B:5060
+
+[trunk_sip]
+type=identify
+endpoint=trunk_sip
+match=IP_B
+```
+
+Sede B: idéntico con `IP_A` en las dos líneas.
+
+Sin claves, sin registro y sin caducidad: con host networking la IP de origen
+llega intacta, así que `identify` es control de acceso real. La variante B sólo
+hace falta en Docker Desktop.
+
+La plantilla es `aor-troncal-externa`, con el `qualify_timeout` más holgado para
+la latencia de internet.
+
+#### Firewall — aprovechar que las IPs son fijas
+
+La troncal y los teléfonos tienen necesidades distintas, y conviene separarlos:
+
+```bash
+sudo ufw allow OpenSSH
+
+# Troncal: sólo la otra sede. Nadie más toca el 5060.
+sudo ufw allow from IP_B to any port 5060 proto udp comment 'Troncal SIP'
+sudo ufw allow from IP_B to any port 10000:10020 proto udp comment 'Troncal RTP'
+
+# Softphones: por TLS, abierto porque sus IPs no son fijas.
+sudo ufw allow 5061/tcp comment 'Extensiones TLS'
+sudo ufw allow 10000:10020/udp comment 'RTP extensiones'
+
+sudo ufw enable
+sudo ufw status numbered
+```
+
+Así el 5060 UDP no queda expuesto a internet, que es donde llegan los intentos
+de registro automatizados en cuestión de horas. Para eso las extensiones deben
+usar `(endpoint-interno-tls)` en lugar de `(endpoint-interno)`.
+
+En cloud, abrir lo mismo en el grupo de seguridad, **en UDP y TCP** (§5).
+
+#### Pruebas, en este orden
 
 ```
-pjsip show endpoints         ; trunk_sip Avail en los dos lados
+pjsip show transports        ; udp 5060 y tls 5061
+pjsip show endpoints         ; trunk_sip debe estar Avail en los dos lados
+pjsip show identifies        ; el match con la IP de la otra sede
+pjsip show contacts          ; las extensiones, con ;transport=TLS
 ```
 
-1. Llamada local en cada sede: `1001` → otra extensión de su LAN.
-2. Entre sedes: desde `1001` marcar `82001`.
-3. Conferencia mixta: los dos marcan `800` y comprobar `confbridge list 800`.
+1. **Registro local.** `1001` en su LAN contra `IP_A`, con Transport = TLS.
+2. **Llamada interna en cada sede**, para validar audio sin troncal por medio.
+3. **Entre sedes.** Desde `1001` marcar `82001`.
+4. **Audio bidireccional.** Es lo que se rompe aquí y no en LAN: si se oye en un
+   solo sentido, revisar el rango RTP abierto en los dos firewalls.
+5. **Conferencia mixta.** Los dos marcan `800`; comprobar `confbridge list 800`.
+6. **Cifrado.** `core show channel <canal>` durante una llamada debe indicar
+   SRTP. En Wireshark, si *Play Streams* reproduce la conversación, no está
+   cifrado.
 
-Lo que se rompe aquí y no en los escenarios anteriores es el audio
-bidireccional entre sedes, porque hay dos NAT por medio. Si la señalización va
-pero el audio no, revisar el rango RTP abierto y reenviado **en los dos
-routers**.
+#### Antes de entregar
+
+- [ ] `ip -br -4 addr` muestra la pública en los dos servidores
+- [ ] No existe `compose.override.yaml` en ninguno
+- [ ] `pjsip_local.conf` sin IPs, creado desde el `.example`
+- [ ] Certificado generado en cada máquina; `keys/` no versionado
+- [ ] Claves de las extensiones cambiadas: ya no son `1001`/`1002`
+- [ ] `ufw` con el 5060 restringido por IP de origen
+- [ ] `sudo ufw allow OpenSSH` antes de `ufw enable`
+- [ ] Ninguna VPN activa en los servidores
+- [ ] Cada sede con su propio rango de numeración
 
 ---
 
-## 8. Verificación y diagnóstico
+## 9. Verificación y diagnóstico
 
 ```bash
 make cli
